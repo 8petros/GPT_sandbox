@@ -1,0 +1,67 @@
+{
+  "name": "Periodic multi-engine web search to Markdown",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "hours", "hoursInterval": 6}]}},
+      "id": "8b370c0e-4730-4fb1-bfb1-0c7ebc4916c9",
+      "name": "Every 6 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-900, 0]
+    },
+    {
+      "parameters": {"jsCode": "// Edit searches and engines here. Operators are passed to the search engine unchanged.\nconst config = {\n  endpoint: $env.SEARXNG_URL || 'https://searx.be/search',\n  engines: ['google', 'bing', 'brave'],\n  searches: [\n    { expression: '(n8n OR automation) AND \\\"web search\\\"', matchingKeywords: ['n8n', 'automation', 'web search'] },\n    { expression: '(AI OR LLM) AND (agent OR workflow) -job', matchingKeywords: ['AI', 'LLM', 'agent', 'workflow'] }\n  ]\n};\n\nreturn config.searches.map((search) => {\n  const url = new URL(config.endpoint);\n  url.searchParams.set('format', 'json');\n  url.searchParams.set('q', search.expression);\n  url.searchParams.set('engines', config.engines.join(','));\n  return { json: { ...search, engines: config.engines, url: url.toString() } };\n});"},
+      "id": "315dcc9c-d419-4a25-8c16-5a38aa0f3ec7",
+      "name": "Build logical searches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-680, 0]
+    },
+    {
+      "parameters": {"url": "={{ $json.url }}", "options": {"timeout": 30000}},
+      "id": "24d1cf42-bbd2-4519-895e-6470ba9f2130",
+      "name": "Search SearXNG engines",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-440, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {"jsCode": "// SearXNG returns one response per logical expression, with a source engine on each result.\n// Workflow static data survives production executions and provides durable de-duplication.\nconst staticData = $getWorkflowStaticData('global');\nstaticData.seen ??= {};\nconst now = new Date();\nconst searched = $items('Build logical searches', 0, 0);\nconst searchByExpression = new Map(searched.map(({ json }) => [json.expression, json]));\nconst output = [];\n\nfor (const item of $input.all()) {\n  const response = item.json;\n  const search = searchByExpression.get(response.query);\n  if (!search || !Array.isArray(response.results)) continue;\n\n  for (const result of response.results) {\n    const link = result.url || result.link;\n    if (!link) continue;\n    const key = link.replace(/#.*$/, '').replace(/\\/$/, '').toLowerCase();\n    if (staticData.seen[key]) continue;\n    staticData.seen[key] = now.toISOString();\n\n    output.push({\n      json: {\n        date: now.toISOString().slice(0, 10),\n        time: now.toISOString().slice(11, 19) + ' UTC',\n        query: search.expression,\n        matchingKeywords: search.matchingKeywords.join(', '),\n        engine: result.engine || result.engines?.join(', ') || 'SearXNG',\n        title: String(result.title || link).replace(/\\s+/g, ' ').trim(),\n        link,\n        lead: String(result.content || result.snippet || '').replace(/\\s+/g, ' ').trim()\n      }\n    });\n  }\n}\nreturn output;"},
+      "id": "993baa12-1ca7-4ecc-b4b2-09ab2067eb8c",
+      "name": "Remove duplicates and normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-200, 0]
+    },
+    {
+      "parameters": {"jsCode": "const rows = $input.all().map(({ json }) => {\n  const safeTitle = json.title.replace(/[\\r\\n]+/g, ' ');\n  const safeLead = json.lead.replace(/[\\r\\n]+/g, ' ');\n  return `## ${json.date} ${json.time} — ${safeTitle}\\n\\n- **Matching keywords:** ${json.matchingKeywords}\\n- **Query:** ${json.query}\\n- **Search engine:** ${json.engine}\\n- **Link:** [Open result](${json.link})\\n- **Lead:** ${safeLead}\\n`;\n});\nif (!rows.length) return [];\nconst markdown = `\\n${rows.join('\\n')}\\n`;\nreturn [{ json: { markdownBase64: Buffer.from(markdown, 'utf8').toString('base64'), resultCount: rows.length } }];"},
+      "id": "a5a79974-7dd4-4afc-82da-243e8a5c0bd2",
+      "name": "Format Markdown append block",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [40, 0]
+    },
+    {
+      "parameters": {"command": "=mkdir -p $(dirname '${SEARCH_LOG_PATH:-/files/periodic-web-search.md}') && echo '{{ $json.markdownBase64 }}' | base64 -d >> '${SEARCH_LOG_PATH:-/files/periodic-web-search.md}'"},
+      "id": "c20a73a2-4f8c-44e2-8d20-38cc328439e1",
+      "name": "Append Markdown file",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [280, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 6 hours": {"main": [[{"node": "Build logical searches", "type": "main", "index": 0}]]},
+    "Build logical searches": {"main": [[{"node": "Search SearXNG engines", "type": "main", "index": 0}]]},
+    "Search SearXNG engines": {"main": [[{"node": "Remove duplicates and normalize", "type": "main", "index": 0}]]},
+    "Remove duplicates and normalize": {"main": [[{"node": "Format Markdown append block", "type": "main", "index": 0}]]},
+    "Format Markdown append block": {"main": [[{"node": "Append Markdown file", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "timezone": "UTC"},
+  "versionId": "f4448229-5198-4243-822e-6b9298ec7a43",
+  "meta": {"templateCredsSetupCompleted": true},
+  "tags": []
+}
